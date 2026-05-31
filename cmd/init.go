@@ -586,40 +586,31 @@ func initCore(fnNotify func(sub models.Subscriber, listIDs []int) (int, error), 
 }
 
 // initCampaignManager initializes the campaign manager.
-func initCampaignManager(msgrs []manager.Messenger, q *models.Queries, u *UrlConfig, co *core.Core, md media.Store, i *i18n.I18n, ko *koanf.Koanf) *manager.Manager {
+// Messengers are attached separately after creation so that SMTP messengers
+// can receive a quota-reset callback pointing back to the manager.
+func initCampaignManager(q *models.Queries, u *UrlConfig, co *core.Core, md media.Store, i *i18n.I18n, ko *koanf.Koanf) *manager.Manager {
 	if ko.Bool("passive") {
 		lo.Println("running in passive mode. won't process campaigns.")
 	}
 
-	mgr := manager.New(manager.Config{
-		BatchSize:             ko.Int("app.batch_size"),
-		Concurrency:           ko.Int("app.concurrency"),
-		MessageRate:           ko.Int("app.message_rate"),
-		MaxSendErrors:         ko.Int("app.max_send_errors"),
-		FromEmail:             ko.String("app.from_email"),
-		IndividualTracking:    ko.Bool("privacy.individual_tracking"),
-		DisableTracking:       ko.Bool("privacy.disable_tracking"),
-		UnsubURL:              u.UnsubURL,
-		OptinURL:              u.OptinURL,
-		LinkTrackURL:          u.LinkTrackURL,
-		ViewTrackURL:          u.ViewTrackURL,
-		MessageURL:            u.MessageURL,
-		ArchiveURL:            u.ArchiveURL,
-		RootURL:               u.RootURL,
-		UnsubHeader:           ko.Bool("privacy.unsubscribe_header"),
-		SlidingWindow:         ko.Bool("app.message_sliding_window"),
-		SlidingWindowDuration: ko.Duration("app.message_sliding_window_duration"),
-		SlidingWindowRate:     ko.Int("app.message_sliding_window_rate"),
-		ScanInterval:          time.Second * 5,
-		ScanCampaigns:         !ko.Bool("passive"),
+	return manager.New(manager.Config{
+		BatchSize:          ko.Int("app.batch_size"),
+		Concurrency:        ko.Int("app.concurrency"),
+		MaxSendErrors:      ko.Int("app.max_send_errors"),
+		FromEmail:          ko.String("app.from_email"),
+		IndividualTracking: ko.Bool("privacy.individual_tracking"),
+		DisableTracking:    ko.Bool("privacy.disable_tracking"),
+		UnsubURL:           u.UnsubURL,
+		OptinURL:           u.OptinURL,
+		LinkTrackURL:       u.LinkTrackURL,
+		ViewTrackURL:       u.ViewTrackURL,
+		MessageURL:         u.MessageURL,
+		ArchiveURL:         u.ArchiveURL,
+		RootURL:            u.RootURL,
+		UnsubHeader:        ko.Bool("privacy.unsubscribe_header"),
+		ScanInterval:       time.Second * 5,
+		ScanCampaigns:      !ko.Bool("passive"),
 	}, newManagerStore(q, co, md), i, lo)
-
-	// Attach all messengers to the campaign manager.
-	for _, m := range msgrs {
-		mgr.AddMessenger(m)
-	}
-
-	return mgr
 }
 
 // initTxTemplates initializes and compiles the transactional templates and caches them in-memory.
@@ -662,8 +653,10 @@ func initImporter(q *models.Queries, db *sqlx.DB, core *core.Core, i *i18n.I18n,
 		}, db.DB, i)
 }
 
-// initSMTPMessenger initializes the combined and individual SMTP messengers.
-func initSMTPMessengers() []manager.Messenger {
+// initSMTPMessengers initializes the combined and individual SMTP messengers.
+// onQuotaReset is called at midnight UTC after daily quota counters reset;
+// it is wired to the campaign manager to resume quota-paused campaigns.
+func initSMTPMessengers(onQuotaReset func()) []manager.Messenger {
 	var (
 		servers = []email.Server{}
 		out     = []manager.Messenger{}
@@ -687,7 +680,9 @@ func initSMTPMessengers() []manager.Messenger {
 		// If the server has a name, initialize it as a standalone e-mail messenger
 		// allowing campaigns to select individual SMTPs. In the UI and config, it'll appear as `email / $name`.
 		if s.Name != "" {
-			msgr, err := email.New(s.Name, s)
+			// Named individual messengers do not need the quota reset callback;
+			// only the combined pool messenger triggers campaign resumption.
+			msgr, err := email.New(s.Name, nil, s)
 			if err != nil {
 				lo.Fatalf("error initializing e-mail messenger: %v", err)
 			}
@@ -696,7 +691,7 @@ func initSMTPMessengers() []manager.Messenger {
 	}
 
 	// Initialize the 'email' messenger with all SMTP servers.
-	msgr, err := email.New(email.MessengerName, servers...)
+	msgr, err := email.New(email.MessengerName, onQuotaReset, servers...)
 	if err != nil {
 		lo.Fatalf("error initializing e-mail messenger: %v", err)
 	}

@@ -128,6 +128,8 @@ CREATE TABLE campaigns (
     archive_template_id INTEGER REFERENCES templates(id) ON DELETE SET NULL,
     archive_meta        JSONB NOT NULL DEFAULT '{}',
 
+    pause_reason     TEXT DEFAULT NULL,
+
     started_at       TIMESTAMP WITH TIME ZONE,
     created_at       TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at       TIMESTAMP WITH TIME ZONE DEFAULT NOW()
@@ -279,8 +281,8 @@ INSERT INTO settings (key, value) VALUES
     ('upload.s3.bucket_type', '"public"'),
     ('upload.s3.expiry', '"167h"'),
     ('smtp',
-        '[{"enabled":true, "host":"smtp.yoursite.com","port":25,"auth_protocol":"cram","username":"username","password":"password","hello_hostname":"","max_conns":10,"idle_timeout":"15s","wait_timeout":"5s","max_msg_retries":2,"msg_retry_delay":"10ms","tls_type":"STARTTLS","tls_skip_verify":false,"email_headers":[], "from_addresses":[]},
-          {"enabled":false, "host":"smtp.gmail.com","port":465,"auth_protocol":"login","username":"username@gmail.com","password":"password","hello_hostname":"","max_conns":10,"idle_timeout":"15s","wait_timeout":"5s","max_msg_retries":2,"msg_retry_delay":"10ms","tls_type":"TLS","tls_skip_verify":false,"email_headers":[], "from_addresses":[]}]'),
+        '[{"enabled":true, "host":"smtp.yoursite.com","port":25,"auth_protocol":"cram","username":"username","password":"password","hello_hostname":"","max_conns":10,"idle_timeout":"15s","wait_timeout":"5s","max_msg_retries":2,"msg_retry_delay":"10ms","tls_type":"STARTTLS","tls_skip_verify":false,"email_headers":[], "from_addresses":[],"max_rate":0,"sliding_window":false,"sliding_window_rate":0,"sliding_window_duration":"","daily_send_quota":0},
+          {"enabled":false, "host":"smtp.gmail.com","port":465,"auth_protocol":"login","username":"username@gmail.com","password":"password","hello_hostname":"","max_conns":10,"idle_timeout":"15s","wait_timeout":"5s","max_msg_retries":2,"msg_retry_delay":"10ms","tls_type":"TLS","tls_skip_verify":false,"email_headers":[], "from_addresses":[],"max_rate":0,"sliding_window":false,"sliding_window_rate":0,"sliding_window_duration":"","daily_send_quota":0}]'),
     ('messengers', '[]'),
     ('bounce.enabled', 'false'),
     ('bounce.webhooks_enabled', 'false'),

@@ -2,12 +2,15 @@ package email
 
 import (
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"math/rand"
 	"net/mail"
 	"net/smtp"
 	"net/textproto"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/knadh/listmonk/internal/utils"
 	"github.com/knadh/listmonk/models"
@@ -23,6 +26,27 @@ const (
 	hdrMessageID  = "Message-Id"
 )
 
+// ErrQuotaExhausted is returned by Push() when all SMTP servers in the pool
+// have reached their daily send quota.
+var ErrQuotaExhausted = errors.New("all SMTP servers have reached their daily send quota")
+
+// quotaState tracks daily send count per server. Reset at midnight UTC.
+type quotaState struct {
+	mu        sync.Mutex
+	sentToday int64
+}
+
+// rateState tracks per-second and sliding-window rate limiting per server.
+type rateState struct {
+	mu          sync.Mutex
+	lastSent    time.Time
+	minInterval time.Duration // time.Second / MaxRate
+
+	windowStart time.Time
+	windowCount int
+	windowDur   time.Duration
+}
+
 // Server represents an SMTP server's credentials.
 type Server struct {
 	// Name is a unique identifier for the server.
@@ -35,12 +59,20 @@ type Server struct {
 	EmailHeaders  map[string]string `json:"email_headers"`
 	FromAddresses []string          `json:"from_addresses"`
 
+	MaxRate               int    `json:"max_rate"`
+	SlidingWindow         bool   `json:"sliding_window"`
+	SlidingWindowRate     int    `json:"sliding_window_rate"`
+	SlidingWindowDuration string `json:"sliding_window_duration"`
+	DailySendQuota        int    `json:"daily_send_quota"`
+
 	// Rest of the options are embedded directly from the smtppool lib.
 	// The JSON tag is for config unmarshal to work.
 	//lint:ignore SA5008 ,squash is needed by koanf/mapstructure config unmarshal.
 	smtppool.Opt `json:",squash"`
 
-	pool *smtppool.Pool
+	pool  *smtppool.Pool
+	quota *quotaState
+	rate  *rateState
 }
 
 // Emailer is the SMTP e-mail messenger.
@@ -51,6 +83,10 @@ type Emailer struct {
 	// or a domain set per SMTPs server). An empty key holds all servers
 	// and is the fallback round-robin when there's no match (old behaviour).
 	pools map[string][]*Server
+
+	// onQuotaReset is called after daily quota counters are reset at midnight UTC.
+	// Used to resume campaigns paused due to quota exhaustion.
+	onQuotaReset func()
 }
 
 // NormalizeAddr normalizes an e-mail address (strip spaces, lowercase).
@@ -59,12 +95,12 @@ func NormalizeAddr(s string) string {
 }
 
 // New returns an SMTP e-mail Messenger backend with the given SMTP servers.
-// Group indicates whether the messenger represents a group of SMTP servers (1 or more)
-// that are used as a round-robin pool, or a single server.
-func New(name string, servers ...Server) (*Emailer, error) {
+// onQuotaReset is called at midnight UTC after daily counters reset; pass nil to disable.
+func New(name string, onQuotaReset func(), servers ...Server) (*Emailer, error) {
 	e := &Emailer{
-		name:  name,
-		pools: make(map[string][]*Server),
+		name:         name,
+		pools:        make(map[string][]*Server),
+		onQuotaReset: onQuotaReset,
 	}
 
 	for _, srv := range servers {
@@ -109,6 +145,17 @@ func New(name string, servers ...Server) (*Emailer, error) {
 		}
 
 		s.pool = pool
+		s.quota = &quotaState{}
+		s.rate = &rateState{
+			windowStart: time.Now(),
+		}
+		if s.MaxRate > 0 {
+			s.rate.minInterval = time.Second / time.Duration(s.MaxRate)
+		}
+		if s.SlidingWindowDuration != "" {
+			d, _ := time.ParseDuration(s.SlidingWindowDuration)
+			s.rate.windowDur = d
+		}
 
 		// Add to the global list (empty key) and to each from-address
 		// bucket. Duplicate keys across servers are fine and get round-robin'd.
@@ -119,6 +166,8 @@ func New(name string, servers ...Server) (*Emailer, error) {
 			}
 		}
 	}
+
+	go e.runQuotaReset()
 
 	return e, nil
 }
@@ -138,7 +187,22 @@ func (e *Emailer) Push(m models.Message) error {
 			pool = srvs
 		}
 	}
-	srv := pool[rand.Intn(len(pool))]
+
+	// Filter out quota-exhausted servers.
+	eligible := make([]*Server, 0, len(pool))
+	for _, s := range pool {
+		if !s.isQuotaExhausted() {
+			eligible = append(eligible, s)
+		}
+	}
+	if len(eligible) == 0 {
+		return ErrQuotaExhausted
+	}
+
+	srv := eligible[rand.Intn(len(eligible))]
+
+	// Apply per-SMTP rate limiting (may sleep briefly).
+	srv.applyRateLimit()
 
 	// Are there attachments?
 	var files []smtppool.Attachment
@@ -219,7 +283,12 @@ func (e *Emailer) Push(m models.Message) error {
 		}
 	}
 
-	return srv.pool.Send(em)
+	if err := srv.pool.Send(em); err != nil {
+		return err
+	}
+
+	srv.incrementQuota()
+	return nil
 }
 
 // Flush flushes the message queue to the server.
@@ -233,6 +302,89 @@ func (e *Emailer) Close() error {
 		s.pool.Close()
 	}
 	return nil
+}
+
+// runQuotaReset resets all server daily counters at UTC midnight and calls onQuotaReset.
+// Runs for the lifetime of the Emailer.
+func (e *Emailer) runQuotaReset() {
+	for {
+		time.Sleep(time.Until(nextMidnightUTC()))
+		for _, srv := range e.pools[""] {
+			srv.quota.mu.Lock()
+			srv.quota.sentToday = 0
+			srv.quota.mu.Unlock()
+		}
+		if e.onQuotaReset != nil {
+			e.onQuotaReset()
+		}
+	}
+}
+
+// nextMidnightUTC returns the next UTC midnight.
+func nextMidnightUTC() time.Time {
+	now := time.Now().UTC()
+	return time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, time.UTC)
+}
+
+// isQuotaExhausted reports whether this server has reached its daily send limit.
+func (s *Server) isQuotaExhausted() bool {
+	if s.DailySendQuota <= 0 {
+		return false
+	}
+	s.quota.mu.Lock()
+	defer s.quota.mu.Unlock()
+	return s.quota.sentToday >= int64(s.DailySendQuota)
+}
+
+// incrementQuota increments the daily sent counter after a successful send.
+func (s *Server) incrementQuota() {
+	if s.DailySendQuota <= 0 {
+		return
+	}
+	s.quota.mu.Lock()
+	s.quota.sentToday++
+	s.quota.mu.Unlock()
+}
+
+// applyRateLimit sleeps if needed to respect per-second and sliding-window limits.
+// Each concurrent caller "reserves" its send slot so limits are correctly shared.
+func (s *Server) applyRateLimit() {
+	// Per-second rate limit.
+	if s.MaxRate > 0 && s.rate.minInterval > 0 {
+		s.rate.mu.Lock()
+		now := time.Now()
+		var wait time.Duration
+		if elapsed := now.Sub(s.rate.lastSent); elapsed < s.rate.minInterval {
+			wait = s.rate.minInterval - elapsed
+		}
+		s.rate.lastSent = now.Add(wait)
+		s.rate.mu.Unlock()
+		if wait > 0 {
+			time.Sleep(wait)
+		}
+	}
+
+	// Sliding window rate limit.
+	if s.SlidingWindow && s.SlidingWindowRate > 0 && s.rate.windowDur.Seconds() > 1 {
+		s.rate.mu.Lock()
+		now := time.Now()
+		diff := now.Sub(s.rate.windowStart)
+		if diff >= s.rate.windowDur {
+			s.rate.windowStart = now
+			s.rate.windowCount = 0
+		}
+		s.rate.windowCount++
+		var wait time.Duration
+		if s.rate.windowCount >= s.SlidingWindowRate {
+			wait = s.rate.windowDur - diff
+			s.rate.windowStart = now.Add(wait)
+			s.rate.windowCount = 0
+		}
+		s.rate.mu.Unlock()
+		if wait > 0 {
+			time.Sleep(wait)
+		}
+	}
 }
 
 // getPool returns the pool of servers configured to handle the given From

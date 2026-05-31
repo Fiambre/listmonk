@@ -84,9 +84,11 @@ type Queries struct {
 	GetRunningCampaign       *sqlx.Stmt `query:"get-running-campaign"`
 	NextCampaignSubscribers  *sqlx.Stmt `query:"next-campaign-subscribers"`
 	GetOneCampaignSubscriber *sqlx.Stmt `query:"get-one-campaign-subscriber"`
-	UpdateCampaign           *sqlx.Stmt `query:"update-campaign"`
-	UpdateCampaignStatus     *sqlx.Stmt `query:"update-campaign-status"`
-	UpdateCampaignCounts     *sqlx.Stmt `query:"update-campaign-counts"`
+	UpdateCampaign               *sqlx.Stmt `query:"update-campaign"`
+	UpdateCampaignStatus         *sqlx.Stmt `query:"update-campaign-status"`
+	PauseCampaignWithReason      *sqlx.Stmt `query:"pause-campaign-with-reason"`
+	ResumeQuotaPausedCampaigns   *sqlx.Stmt `query:"resume-quota-paused-campaigns"`
+	UpdateCampaignCounts         *sqlx.Stmt `query:"update-campaign-counts"`
 	UpdateCampaignArchive    *sqlx.Stmt `query:"update-campaign-archive"`
 	RegisterCampaignView     *sqlx.Stmt `query:"register-campaign-view"`
 	DeleteCampaign           *sqlx.Stmt `query:"delete-campaign"`

@@ -451,6 +451,13 @@ UPDATE campaigns SET
     updated_at=NOW()
 WHERE id = $1;
 
+-- name: pause-campaign-with-reason
+UPDATE campaigns SET status='paused', pause_reason=$2, updated_at=NOW() WHERE id=$1;
+
+-- name: resume-quota-paused-campaigns
+UPDATE campaigns SET status='running', pause_reason=NULL, updated_at=NOW()
+WHERE status='paused' AND pause_reason='quota_exhausted';
+
 -- name: update-campaign-archive
 UPDATE campaigns SET
     archive=$2,

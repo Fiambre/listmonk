@@ -21,13 +21,8 @@ type Settings struct {
 	AppBatchSize             int    `json:"app.batch_size"`
 	AppConcurrency           int    `json:"app.concurrency"`
 	AppMaxSendErrors         int    `json:"app.max_send_errors"`
-	AppMessageRate           int    `json:"app.message_rate"`
 	CacheSlowQueries         bool   `json:"app.cache_slow_queries"`
 	CacheSlowQueriesInterval string `json:"app.cache_slow_queries_interval"`
-
-	AppMessageSlidingWindow         bool   `json:"app.message_sliding_window"`
-	AppMessageSlidingWindowDuration string `json:"app.message_sliding_window_duration"`
-	AppMessageSlidingWindowRate     int    `json:"app.message_sliding_window_rate"`
 
 	PrivacyIndividualTracking bool     `json:"privacy.individual_tracking"`
 	PrivacyDisableTracking    bool     `json:"privacy.disable_tracking"`
@@ -100,6 +95,12 @@ type Settings struct {
 		TLSType       string              `json:"tls_type"`
 		TLSSkipVerify bool                `json:"tls_skip_verify"`
 		FromAddresses []string            `json:"from_addresses"`
+
+		MaxRate               int    `json:"max_rate"`
+		SlidingWindow         bool   `json:"sliding_window"`
+		SlidingWindowRate     int    `json:"sliding_window_rate"`
+		SlidingWindowDuration string `json:"sliding_window_duration"`
+		DailySendQuota        int    `json:"daily_send_quota"`
 	} `json:"smtp"`
 
 	Messengers []struct {

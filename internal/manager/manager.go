@@ -14,6 +14,7 @@ import (
 
 	"github.com/Masterminds/sprig/v3"
 	"github.com/knadh/listmonk/internal/i18n"
+	"github.com/knadh/listmonk/internal/messenger/email"
 	"github.com/knadh/listmonk/internal/notifs"
 	"github.com/knadh/listmonk/models"
 	"golang.org/x/text/cases"
@@ -39,6 +40,8 @@ type Store interface {
 	GetAttachment(mediaID int) (models.Attachment, error)
 	UpdateCampaignStatus(campID int, status string) error
 	UpdateCampaignCounts(campID int, toSend int, sent int, lastSubID int) error
+	PauseWithReason(campID int, reason string) error
+	ResumeQuotaPausedCampaigns() error
 	CreateLink(url string) (string, error)
 	BlocklistSubscriber(id int64) error
 	DeleteSubscriber(id int64) error
@@ -85,12 +88,6 @@ type Manager struct {
 	campMsgQ  chan CampaignMessage
 	msgQ      chan models.Message
 
-	// Sliding window keeps track of the total number of messages sent in a period
-	// and on reaching the specified limit, waits until the window is over before
-	// sending further messages.
-	slidingCount int
-	slidingStart time.Time
-
 	tplFuncs template.FuncMap
 }
 
@@ -114,14 +111,10 @@ type CampaignMessage struct {
 // Config has parameters for configuring the manager.
 type Config struct {
 	// Number of subscribers to pull from the DB in a single iteration.
-	BatchSize             int
-	Concurrency           int
-	MessageRate           int
-	MaxSendErrors         int
-	SlidingWindow         bool
-	SlidingWindowDuration time.Duration
-	SlidingWindowRate     int
-	RequeueOnError        bool
+	BatchSize      int
+	Concurrency    int
+	MaxSendErrors  int
+	RequeueOnError bool
 	FromEmail             string
 	IndividualTracking    bool
 	DisableTracking       bool
@@ -155,10 +148,6 @@ func New(cfg Config, store Store, i *i18n.I18n, l *log.Logger) *Manager {
 	if cfg.Concurrency < 1 {
 		cfg.Concurrency = 1
 	}
-	if cfg.MessageRate < 1 {
-		cfg.MessageRate = 1
-	}
-
 	m := &Manager{
 		cfg:   cfg,
 		store: store,
@@ -166,15 +155,14 @@ func New(cfg Config, store Store, i *i18n.I18n, l *log.Logger) *Manager {
 		fnNotify: func(subject string, data any) error {
 			return notifs.NotifySystem(subject, notifs.TplCampaignStatus, data, nil)
 		},
-		log:          l,
-		messengers:   make(map[string]Messenger),
-		pipes:        make(map[int]*pipe),
-		tpls:         make(map[int]*models.Template),
-		links:        make(map[string]string),
-		nextPipes:    make(chan *pipe, 1000),
-		campMsgQ:     make(chan CampaignMessage, cfg.Concurrency*cfg.MessageRate*2),
-		msgQ:         make(chan models.Message, cfg.Concurrency*cfg.MessageRate*2),
-		slidingStart: time.Now(),
+		log:        l,
+		messengers: make(map[string]Messenger),
+		pipes:      make(map[int]*pipe),
+		tpls:       make(map[int]*models.Template),
+		links:      make(map[string]string),
+		nextPipes:  make(chan *pipe, 1000),
+		campMsgQ:   make(chan CampaignMessage, cfg.Concurrency*100),
+		msgQ:       make(chan models.Message, cfg.Concurrency*100),
 	}
 	m.tplFuncs = m.makeGnericFuncMap()
 
@@ -417,6 +405,16 @@ func (m *Manager) Close() {
 	close(m.msgQ)
 }
 
+// ResumeQuotaPausedCampaigns resumes all campaigns paused due to SMTP quota exhaustion.
+// Called automatically at midnight UTC when per-SMTP quota counters reset.
+func (m *Manager) ResumeQuotaPausedCampaigns() {
+	if err := m.store.ResumeQuotaPausedCampaigns(); err != nil {
+		m.log.Printf("error resuming quota-paused campaigns: %v", err)
+		return
+	}
+	m.log.Printf("resumed campaigns paused due to SMTP quota exhaustion")
+}
+
 // scanCampaigns is a blocking function that periodically scans the data source
 // for campaigns to process and dispatches them to the manager. It feeds campaigns
 // into nextPipes.
@@ -461,8 +459,6 @@ func (m *Manager) scanCampaigns(tick time.Duration) {
 // worker is a blocking function that perpetually listents to events (message) on different
 // queues and processes them.
 func (m *Manager) worker() {
-	// Counter to keep track of the message / sec rate limit.
-	numMsg := 0
 	for {
 		select {
 		// Campaign message.
@@ -477,13 +473,6 @@ func (m *Manager) worker() {
 				msg.pipe.wg.Done()
 				continue
 			}
-
-			// Pause on hitting the message rate.
-			if numMsg >= m.cfg.MessageRate {
-				time.Sleep(time.Second)
-				numMsg = 0
-			}
-			numMsg++
 
 			// Outgoing message.
 			out := models.Message{
@@ -530,9 +519,13 @@ func (m *Manager) worker() {
 				msg.pipe.wg.Done()
 
 				if err != nil {
-					// Call the error callback, which keeps track of the error count
-					// and stops the campaign if the error count exceeds the threshold.
-					msg.pipe.OnError()
+					if errors.Is(err, email.ErrQuotaExhausted) {
+						msg.pipe.OnQuotaExhausted()
+					} else {
+						// Call the error callback, which keeps track of the error count
+						// and stops the campaign if the error count exceeds the threshold.
+						msg.pipe.OnError()
+					}
 				} else {
 					id := uint64(msg.Subscriber.ID)
 					if id > msg.pipe.lastID.Load() {

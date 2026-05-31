@@ -79,6 +79,18 @@ func (s *store) UpdateCampaignStatus(campID int, status string) error {
 	return err
 }
 
+// PauseWithReason pauses a campaign and records the reason (e.g. "quota_exhausted").
+func (s *store) PauseWithReason(campID int, reason string) error {
+	_, err := s.queries.PauseCampaignWithReason.Exec(campID, reason)
+	return err
+}
+
+// ResumeQuotaPausedCampaigns resumes all campaigns paused due to SMTP quota exhaustion.
+func (s *store) ResumeQuotaPausedCampaigns() error {
+	_, err := s.queries.ResumeQuotaPausedCampaigns.Exec()
+	return err
+}
+
 // UpdateCampaignCounts updates a campaign's status.
 func (s *store) UpdateCampaignCounts(campID int, toSend int, sent int, lastSubID int) error {
 	_, err := s.queries.UpdateCampaignCounts.Exec(campID, toSend, sent, lastSubID)
