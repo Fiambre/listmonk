@@ -209,11 +209,19 @@ func main() {
 		// Crud core.
 		core = initCore(fbOptinNotify, queries, db, i18n, ko)
 
-		// Initialize all messengers, SMTP and postback.
-		msgrs = append(initSMTPMessengers(), initPostbackMessengers(ko)...)
+		// Campaign manager (messengers are registered after initialization).
+		mgr = initCampaignManager(queries, urlCfg, core, media, i18n, ko)
 
-		// Campaign manager.
-		mgr = initCampaignManager(msgrs, queries, urlCfg, core, media, i18n, ko)
+		// Initialize all messengers, SMTP and postback.
+		// The quota reset callback resumes campaigns paused by quota exhaustion.
+		msgrs = append(initSMTPMessengers(mgr.ResumeQuotaPausedCampaigns), initPostbackMessengers(ko)...)
+
+		// Register messengers with the manager.
+		for _, m := range msgrs {
+			if err := mgr.AddMessenger(m); err != nil {
+				lo.Printf("error registering messenger %s: %v", m.Name(), err)
+			}
+		}
 
 		// Bulk importer.
 		importer = initImporter(queries, db, core, i18n, ko)

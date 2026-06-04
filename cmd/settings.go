@@ -396,7 +396,7 @@ func (a *App) TestSMTPSettings(c echo.Context) error {
 	req.MaxConns = 1
 	req.IdleTimeout = time.Second * 2
 	req.PoolWaitTimeout = time.Second * 2
-	msgr, err := email.New("", req)
+	msgr, err := email.New("", nil, req)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest,
 			a.i18n.Ts("globals.messages.errorCreating", "name", "SMTP", "error", err.Error()))
